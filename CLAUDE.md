@@ -6,7 +6,7 @@ A conversational AI system with 7 specialized agents and real external tool capa
 
 ```bash
 # Run the chatbot
-uv run python main.py
+uv run python src/main.py
 
 # Type 'q' to quit and save conversation history
 ```
@@ -14,14 +14,22 @@ uv run python main.py
 ## Project Structure
 
 ```
-├── main.py                    # Core chatbot with LangGraph multi-agent system
-├── mcp_config.py             # Tool management and MCP-style implementations  
-├── mcp_tools.py              # Tool interfaces and smart triggering logic
-├── web_search.py             # DuckDuckGo search implementation
+├── src/
+│   ├── __init__.py           # Package initialization
+│   ├── main.py               # Core chatbot with LangGraph multi-agent system
+│   ├── mcp_client/
+│   │   ├── __init__.py       # MCP client module
+│   │   ├── config.py         # Real MCP client configuration
+│   │   └── tools.py          # MCP tool routing and execution
+│   └── servers/
+│       ├── __init__.py       # Servers module
+│       ├── filesystem_server.py  # FastMCP filesystem server
+│       └── web_search_server.py  # FastMCP web search server
 ├── pyproject.toml            # Dependencies and project config
 ├── uv.lock                   # Dependency lock file
-├── conversation_history.json # Persistent chat history
-└── CLAUDE.md                 # This documentation
+├── conversation_history.json # Persistent chat history (runtime)
+├── CLAUDE.md                 # This documentation
+└── README.md                 # Project README
 ```
 
 ## Agent Types & Capabilities
@@ -135,9 +143,10 @@ uv run python -c "import mcp, requests, langchain_core; print('All imports OK')"
 - **Production-ready** with proper error handling and fallbacks
 
 ### File Organization
-- `main.py`: Core LangGraph logic and agent definitions
-- `mcp_config.py`: Tool implementations (web search, file operations)
-- `mcp_tools.py`: Tool routing and smart triggering logic
-- `web_search.py`: DuckDuckGo API integration
+- `src/main.py`: Core LangGraph logic and agent definitions
+- `src/mcp_client/config.py`: Real MCP client management and server connections
+- `src/mcp_client/tools.py`: MCP tool routing and smart triggering logic
+- `src/servers/filesystem_server.py`: FastMCP filesystem operations server
+- `src/servers/web_search_server.py`: FastMCP DuckDuckGo search server
 
-The system provides real external capabilities while maintaining simplicity and zero external service costs.
+The system provides real MCP server capabilities with process isolation, standards compliance, and compatibility with Claude Desktop, Cursor, and other MCP clients.

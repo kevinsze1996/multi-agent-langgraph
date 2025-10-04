@@ -10,11 +10,11 @@ from langchain_core.messages import messages_from_dict, messages_to_dict
 from pydantic import BaseModel, Field
 
 # MCP imports
-from mcp_config import mcp_manager
-from mcp_tools import MCP_TOOLS_CONFIG, determine_and_execute_tools
+from mcp_client.config import mcp_manager
+from mcp_client.tools import MCP_TOOLS_CONFIG, determine_and_execute_tools_sync
 
 # --- 1. Agent and Model Configuration (EXPANDED) ---
-LOCAL_MODEL_NAME = "llama3.2" # Kept as per your request
+LOCAL_MODEL_NAME = "llama3.2"  # Kept as per your request
 
 # EXPANDED: Added all the new agent personas with their system prompts
 AGENT_CONFIG = {
@@ -47,11 +47,12 @@ AGENT_CONFIG = {
     "teacher": {
         "prompt": """You are a patient and skilled teacher. Your goal is to explain complex topics in a simple, intuitive way.
                      Use analogies, real-world examples, and avoid jargon where possible."""
-    }
+    },
 }
 
 # MCP configuration is now handled in mcp_config.py
 # Tool functions are now handled in mcp_tools.py
+
 
 # --- 2. Pydantic Model for Structured Output (MODIFIED) ---
 class MessageClassifier(BaseModel):
@@ -61,8 +62,9 @@ class MessageClassifier(BaseModel):
     ] = Field(
         ...,
         # MODIFIED: Updated description to give the LLM context for all choices
-        description="Classify the user's message into one of the following categories: 'therapist', 'logical', 'planner', 'coder', 'brainstormer', 'debater', or 'teacher'."
+        description="Classify the user's message into one of the following categories: 'therapist', 'logical', 'planner', 'coder', 'brainstormer', 'debater', or 'teacher'.",
     )
+
 
 # --- 3. Graph State Definition ---
 class State(TypedDict):
@@ -71,14 +73,39 @@ class State(TypedDict):
     tool_results: dict | None  # Store MCP tool results
     available_tools: list | None  # Track which tools are available for current agent
 
+
 # --- 4. Graph Nodes ---
 def classify_message(state: State):
     llm = ChatOllama(model=LOCAL_MODEL_NAME, format="json")
     classifier_llm = llm.with_structured_output(MessageClassifier)
     last_message = state["messages"][-1]
+    
+    # Pre-check for obvious file operations to bypass LLM classification issues
+    message_lower = last_message.content.lower()
+    file_indicators = [
+        # File extensions
+        '.py', '.md', '.txt', '.json', '.js', '.html', '.css', '.yaml', '.yml', '.xml', '.csv',
+        # File operations
+        'read file', 'open file', 'show file', 'display file',
+        'read the', 'open the', 'show the', 'display the',
+        'main.py', 'readme.md', 'config.json'
+    ]
+    
+    has_read_word = any(word in message_lower for word in ['read', 'open', 'show', 'display', 'summarize', 'analyze', 'explain', 'describe', 'review', 'check'])
+    has_file_indicator = any(indicator in message_lower for indicator in file_indicators)
+    
+    if has_read_word and has_file_indicator:
+        agent_name = "coder"
+        available_tools = MCP_TOOLS_CONFIG.get(agent_name, [])
+        return {
+            "next_agent": agent_name,
+            "available_tools": available_tools,
+            "tool_results": {},
+        }
 
     # MODIFIED: The classification prompt now includes instructions for all agent types
     classification_prompt = f"""Based on the user's message, classify their intent into one of the following categories:
+
 - 'therapist': For messages about feelings, emotions, or personal problems.
 - 'logical': For messages asking for facts, information, or objective analysis.
 - 'planner': For messages asking 'how to', for a plan, or for steps to achieve a goal.
@@ -87,71 +114,73 @@ def classify_message(state: State):
 - 'debater': For messages that ask for pros and cons, arguments, or explore a controversial topic.
 - 'teacher': For messages asking for a simple explanation of a complex topic.
 
-IMPORTANT: If the message mentions specific files (like .py, .md, .txt, .json files) or asks to read/write/show/display/open files, classify as 'coder'.
+CRITICAL FILE OPERATION RULES - ALWAYS FOLLOW THESE:
+1. If the message mentions ANY file with extension (.py, .md, .txt, .json, .js, .html, .css, etc.), classify as 'coder'
+2. If the message contains words: "read", "open", "show", "display", "file", "folder", "directory" - classify as 'coder'
+3. If the message asks to "read X file" or "show me X.py" or "open the file" - classify as 'coder'
+4. If the message says "read main.py" or "read the code" or similar - classify as 'coder'
+
+EXAMPLES:
+- "read main.py" → 'coder'
+- "show me the README.md" → 'coder'  
+- "can you read the main.py in src folder" → 'coder'
+- "open the config file" → 'coder'
+- "display the code" → 'coder'
 
 User message: "{last_message.content}"
+
+REMEMBER: File operations = 'coder' agent ALWAYS!
 """
-    
+
     result = classifier_llm.invoke(classification_prompt)
     # The Pydantic model now forces the 'message_type' to be one of the agent names
     agent_name = result.message_type
     available_tools = MCP_TOOLS_CONFIG.get(agent_name, [])
-    
+
     return {
         "next_agent": agent_name,
         "available_tools": available_tools,
-        "tool_results": {}
+        "tool_results": {},
     }
+
 
 def agent_node(state: State, agent_name: str):
     config = AGENT_CONFIG[agent_name]
     llm = ChatOllama(model=LOCAL_MODEL_NAME)
-    
+
     # Get available tools and execute them if needed
     available_tools = state.get("available_tools", [])
     user_message = state["messages"][-1].content
-    
+
     # Execute tools using the new MCP system with proper filename extraction
     tool_results = {}
     if available_tools:
-        # Use the advanced tool execution that handles filename extraction
-        import asyncio
-        try:
-            tool_results = asyncio.run(determine_and_execute_tools(agent_name, user_message))
-        except RuntimeError as e:
-            if "cannot be called from a running event loop" in str(e):
-                # Fallback: use threading for async execution
-                import threading
-                result = [{}]
-                
-                def run_async():
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    result[0] = loop.run_until_complete(determine_and_execute_tools(agent_name, user_message))
-                    loop.close()
-                
-                thread = threading.Thread(target=run_async)
-                thread.start()
-                thread.join()
-                tool_results = result[0]
-    
+        # Use the synchronous wrapper for tool execution
+        tool_results = determine_and_execute_tools_sync(agent_name, user_message)
+
     # Prepare system prompt with tool information
     system_prompt = config["prompt"]
     if tool_results:
         tool_info = "\n\nTool Results:\n"
         for tool, result in tool_results.items():
-            # Truncate very long results for the prompt
-            truncated_result = result[:1000] + "..." if len(result) > 1000 else result
+            # Smart truncation for different types of content
+            if result.startswith("File:") and "Content:" in result:
+                # For file content, allow more space and add helpful truncation message
+                if len(result) > 5000:
+                    truncated_result = result[:5000] + "\n\n[File content truncated for display, but full file was read successfully]"
+                else:
+                    truncated_result = result
+            else:
+                # For other tool results, keep existing limit
+                truncated_result = result[:1000] + "..." if len(result) > 1000 else result
             tool_info += f"- {tool}: {truncated_result}\n"
+        tool_info += "\nUse the tool results above to inform your response.\n"
         system_prompt += tool_info
-    
-    messages = [
-        {"role": "system", "content": system_prompt},
-        state["messages"][-1]
-    ]
-    
+
+    messages = [{"role": "system", "content": system_prompt}, state["messages"][-1]]
+
     response_stream = llm.stream(messages)
-    
+
     full_response = ""
     print("\nAssistant: ", end="", flush=True)
     for chunk in response_stream:
@@ -159,16 +188,15 @@ def agent_node(state: State, agent_name: str):
         full_response += chunk.content
     print("\n")
 
-    return {
-        "messages": [("assistant", full_response)],
-        "tool_results": tool_results
-    }
+    return {"messages": [("assistant", full_response)], "tool_results": tool_results}
+
 
 # --- 5. Graph Edge Logic (The Router) ---
 def router(state: State):
     # The fallback to 'logical' is a safe default if classification is unclear
     agent_name = state.get("next_agent", "logical")
     return agent_name
+
 
 # --- 6. Build the Graph (EXPANDED) ---
 graph_builder = StateGraph(State)
@@ -188,7 +216,7 @@ graph_builder.add_conditional_edges(
     "classifier",
     router,
     # Creates a mapping from each agent name to its own node
-    {agent_name: agent_name for agent_name in AGENT_CONFIG}
+    {agent_name: agent_name for agent_name in AGENT_CONFIG},
 )
 
 # EXPANDED: Add an end-point for every agent node
@@ -200,6 +228,7 @@ graph = graph_builder.compile()
 # --- 7. Main Chatbot Loop (Unchanged) ---
 HISTORY_FILE = "conversation_history.json"
 
+
 def load_history():
     try:
         with open(HISTORY_FILE, "r") as f:
@@ -208,10 +237,12 @@ def load_history():
     except (FileNotFoundError, json.JSONDecodeError):
         return {"messages": []}
 
+
 def save_history(state):
     with open(HISTORY_FILE, "w") as f:
         serializable_messages = messages_to_dict(state["messages"])
         json.dump(serializable_messages, f, indent=2)
+
 
 def run_chatbot():
     state = load_history()
@@ -225,10 +256,28 @@ def run_chatbot():
 
         state["messages"].append(("user", user_input))
         result_state = graph.invoke(state)
-        
+
         state = result_state
 
+
+async def main():
+    """Main async function to handle MCP server initialization and cleanup"""
+    try:
+        # Initialize MCP clients and FastMCP servers
+        await mcp_manager.initialize_servers()
+
+        # Run the chatbot
+        run_chatbot()
+
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        # Clean up MCP sessions and stop servers
+        await mcp_manager.close()
+
+
 if __name__ == "__main__":
-    # Initialize MCP clients
-    asyncio.run(mcp_manager.initialize_servers())
-    run_chatbot()
+    # Run the main async function
+    asyncio.run(main())
